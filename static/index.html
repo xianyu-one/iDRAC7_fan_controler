@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>服务器风扇控制器</title>
+    <style>
+        /* 这里的 CSS 完全保留了您要求的样式，并做了细微调整以确保可见性 */
+        :root {
+            /* 浅色模式变量 */
+            --bg-color: #ffffff;
+            --text-color: #111111;
+            --accent-color: #666666;
+            --meta-color: #888888;
+            
+            /* 玻璃特效变量 */
+            --glass-overlay: rgba(255, 255, 255, 0.2);
+            --card-border: rgba(255, 255, 255, 0.2);
+            
+            --orb-color-1: rgba(0, 0, 0, 0.08);
+            --orb-color-2: rgba(0, 0, 0, 0.05);
+            
+            /* 动画变量 */
+            --transition-speed: 1.6s;
+            --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+            
+            /* 现代字体栈 */
+            --font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Inter', "Segoe UI", Roboto, "Microsoft YaHei", "PingFang SC", sans-serif;
+            
+            --spacing-unit: 1.5rem;
+        }
+
+        /* 自动暗色模式支持 */
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #0a0a0a;
+                --text-color: #ffffff;
+                --accent-color: #a1a1a1;
+                --meta-color: #555555;
+                
+                --glass-overlay: rgba(0, 0, 0, 0.2);
+                --card-border: rgba(255, 255, 255, 0.08);
+                
+                --orb-color-1: rgba(255, 255, 255, 0.08);
+                --orb-color-2: rgba(255, 255, 255, 0.05);
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-family);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            transition: background-color 0.8s ease, color 0.8s ease;
+            position: relative;
+        }
+
+        /* 背景光球 */
+        .background-orbs {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            z-index: -2;
+            pointer-events: none;
+        }
+
+        .orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(60px);
+            opacity: 0.8;
+            animation: float 25s infinite ease-in-out alternate;
+        }
+
+        .orb-1 {
+            width: 70vw;
+            height: 70vw;
+            background: var(--orb-color-1);
+            top: -15%;
+            left: -15%;
+            animation-duration: 35s;
+        }
+
+        .orb-2 {
+            width: 60vw;
+            height: 60vw;
+            background: var(--orb-color-2);
+            bottom: -15%;
+            right: -15%;
+            animation-duration: 45s;
+            animation-delay: -5s;
+        }
+
+        @keyframes float {
+            0% { transform: translate(0, 0) scale(1); }
+            50% { transform: translate(40px, 60px) scale(1.1); }
+            100% { transform: translate(-30px, 20px) scale(0.95); }
+        }
+
+        .frosted-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+            backdrop-filter: blur(80px) saturate(120%);
+            -webkit-backdrop-filter: blur(80px) saturate(120%);
+            background: var(--glass-overlay);
+            pointer-events: none;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: calc(var(--spacing-unit) * 2);
+            text-align: center;
+            position: relative;
+            z-index: 10;
+        }
+
+        .content-wrapper {
+            padding: calc(var(--spacing-unit) * 3);
+            max-width: 900px;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            /* 确保初始状态可见，以防动画失败 */
+            opacity: 0; 
+            animation: fadeInUp var(--transition-speed) var(--ease-out-expo) forwards;
+            transform: translateY(40px);
+        }
+
+        .logo-container {
+            margin-bottom: calc(var(--spacing-unit) * 1);
+        }
+        
+        h1 {
+            font-weight: 600;
+            font-size: 1.2rem;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--meta-color);
+            margin-bottom: 3rem;
+        }
+
+        .data-display {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 2rem;
+            width: 100%;
+            margin-bottom: 4rem;
+        }
+
+        .data-card {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .data-value {
+            font-size: 5rem;
+            font-weight: 800;
+            line-height: 1;
+            letter-spacing: -0.05em;
+            background: linear-gradient(180deg, var(--text-color) 20%, var(--accent-color) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+
+        .data-label {
+            font-size: 1rem;
+            color: var(--accent-color);
+            font-weight: 400;
+        }
+        
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.5rem 1.5rem;
+            border-radius: 50px;
+            background: rgba(125, 125, 125, 0.1);
+            border: 1px solid var(--card-border);
+            color: var(--text-color);
+            font-size: 0.9rem;
+            margin-bottom: 2rem;
+        }
+
+        .action-btn {
+            display: inline-block;
+            padding: 1rem 3rem;
+            background-color: var(--text-color);
+            color: var(--bg-color);
+            text-decoration: none;
+            font-weight: 500;
+            border: 1px solid var(--text-color);
+            border-radius: 100px;
+            transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+            cursor: pointer;
+            font-size: 0.9rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .action-btn:hover {
+            background-color: transparent;
+            color: var(--text-color);
+            transform: translateY(-2px) scale(1.02);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+
+        footer {
+            padding: var(--spacing-unit);
+            text-align: center;
+            font-size: 0.85rem;
+            color: var(--meta-color);
+            opacity: 0.6;
+            margin-top: auto;
+        }
+
+        .error-message {
+            color: #ff4757;
+            background: rgba(255, 71, 87, 0.1);
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 2rem;
+            display: none;
+        }
+
+        @keyframes fadeInUp {
+            0% { opacity: 0; transform: translateY(60px); }
+            100% { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <div class="background-orbs">
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+    </div>
+    <div class="frosted-overlay"></div>
+
+    <main>
+        <div class="content-wrapper">
+            <div class="logo-container">
+                <h1>iDRAC 风扇控制器</h1>
+            </div>
+
+            <div class="status-pill">
+                <span id="mode-display">加载中...</span>
+            </div>
+
+            <div class="data-display">
+                <div class="data-card">
+                    <span class="data-value" id="temp-display">--</span>
+                    <span class="data-label">进气温度 (°C)</span>
+                </div>
+                <div class="data-card">
+                    <span class="data-value" id="speed-display">--</span>
+                    <span class="data-label">风扇转速 (%)</span>
+                </div>
+            </div>
+
+            <div class="error-message" id="error-display"></div>
+
+            <button class="action-btn" onclick="fetchData()">刷新状态</button>
+        </div>
+    </main>
+
+    <footer>
+        <div class="request-id-container">最后更新: <span id="time-display">--</span></div>
+    </footer>
+
+    <script>
+        async function fetchData() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                
+                document.getElementById('temp-display').innerText = data.current_temp || "--";
+                document.getElementById('speed-display').innerText = data.fan_speed > 0 ? data.fan_speed : "自动";
+                document.getElementById('mode-display').innerText = "当前模式: " + data.mode;
+                
+                if (data.last_updated) {
+                    document.getElementById('time-display').innerText = new Date(data.last_updated).toLocaleTimeString();
+                }
+
+                const errDiv = document.getElementById('error-display');
+                if (data.last_error) {
+                    errDiv.style.display = 'block';
+                    errDiv.innerText = "错误: " + data.last_error;
+                } else {
+                    errDiv.style.display = 'none';
+                }
+            } catch (e) {
+                console.error("获取状态失败", e);
+                document.getElementById('mode-display').innerText = "连接失败";
+            }
+        }
+
+        // 立即获取，然后每5秒获取一次
+        fetchData();
+        setInterval(fetchData, 5000);
+    </script>
+</body>
+</html>

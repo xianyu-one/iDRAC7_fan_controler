@@ -1,24 +1,19 @@
 # --- 第一阶段：构建 (Builder) ---
 FROM golang:1.24-alpine AS builder
 
-# 安装 git (go mod download 需要)
 RUN apk add --no-cache git
 
-# 设置工作目录
 WORKDIR /app
 
-# 1. 先复制依赖文件，利用 Docker 缓存层
-COPY go.mod ./
+COPY go.mod go.sum ./
 
-# 下载依赖
-RUN go mod tidy && go mod download
+RUN go mod download
 
-# 2. 复制源代码和静态资源
+# 3. 复制源代码和静态资源
 COPY main.go .
 COPY static/ static/
 
-# 3. 编译 Go 程序
-# CGO_ENABLED=0 确保生成静态链接的二进制文件
+# 4. 编译
 RUN CGO_ENABLED=0 go build -o fanctl main.go
 
 # --- 第二阶段：运行 (Runner) ---

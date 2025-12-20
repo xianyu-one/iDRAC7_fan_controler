@@ -3,321 +3,392 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>服务器风扇控制器</title>
+    <title>iDRAC Controller</title>
     <style>
-        /* 这里的 CSS 完全保留了您要求的样式，并做了细微调整以确保可见性 */
         :root {
-            /* 浅色模式变量 */
-            --bg-color: #ffffff;
-            --text-color: #111111;
+            --bg-color: #f0f2f5;
+            --text-color: #1a1a1a;
             --accent-color: #666666;
             --meta-color: #888888;
             
-            /* 玻璃特效变量 */
-            --glass-overlay: rgba(255, 255, 255, 0.2);
-            --card-border: rgba(255, 255, 255, 0.2);
+            /* 毛玻璃变量 */
+            --glass-bg: rgba(255, 255, 255, 0.4);
+            --glass-border: rgba(255, 255, 255, 0.5);
+            --glass-blur: blur(20px);
+            --card-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.07);
             
-            --orb-color-1: rgba(0, 0, 0, 0.08);
-            --orb-color-2: rgba(0, 0, 0, 0.05);
-            
-            /* 动画变量 */
-            --transition-speed: 1.6s;
-            --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-            
-            /* 现代字体栈 */
-            --font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Inter', "Segoe UI", Roboto, "Microsoft YaHei", "PingFang SC", sans-serif;
-            
-            --spacing-unit: 1.5rem;
+            --orb-1: rgba(65, 105, 225, 0.6);
+            --orb-2: rgba(138, 43, 226, 0.6);
+            --chart-line: #000;
         }
 
-        /* 自动暗色模式支持 */
         @media (prefers-color-scheme: dark) {
             :root {
-                --bg-color: #0a0a0a;
+                --bg-color: #0f0f11;
                 --text-color: #ffffff;
                 --accent-color: #a1a1a1;
-                --meta-color: #555555;
+                --meta-color: #666666;
                 
-                --glass-overlay: rgba(0, 0, 0, 0.2);
-                --card-border: rgba(255, 255, 255, 0.08);
+                --glass-bg: rgba(20, 20, 22, 0.4);
+                --glass-border: rgba(255, 255, 255, 0.08);
+                --card-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
                 
-                --orb-color-1: rgba(255, 255, 255, 0.08);
-                --orb-color-2: rgba(255, 255, 255, 0.05);
+                --orb-1: rgba(52, 152, 219, 0.5);
+                --orb-2: rgba(155, 89, 182, 0.5);
+                --chart-line: #fff;
             }
         }
 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
             background-color: var(--bg-color);
             color: var(--text-color);
-            font-family: var(--font-family);
+            font-family: 'SF Pro Display', system-ui, -apple-system, sans-serif;
             min-height: 100vh;
             display: flex;
             flex-direction: column;
-            overflow: hidden;
-            transition: background-color 0.8s ease, color 0.8s ease;
+            align-items: center;
+            overflow-x: hidden;
+            transition: background-color 0.8s;
             position: relative;
         }
 
-        /* 背景光球 */
-        .background-orbs {
+        /* 优化后的光球：降低不透明度，增加模糊 */
+        .background {
             position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
+            top: 0; left: 0; width: 100%; height: 100%;
+            z-index: -1;
             overflow: hidden;
-            z-index: -2;
-            pointer-events: none;
         }
-
         .orb {
             position: absolute;
             border-radius: 50%;
-            filter: blur(60px);
-            opacity: 0.8;
+            filter: blur(120px); /* 更强的模糊 */
+            opacity: 0.25;       /* 降低亮度 */
             animation: float 25s infinite ease-in-out alternate;
         }
-
-        .orb-1 {
-            width: 70vw;
-            height: 70vw;
-            background: var(--orb-color-1);
-            top: -15%;
-            left: -15%;
-            animation-duration: 35s;
-        }
-
-        .orb-2 {
-            width: 60vw;
-            height: 60vw;
-            background: var(--orb-color-2);
-            bottom: -15%;
-            right: -15%;
-            animation-duration: 45s;
-            animation-delay: -5s;
-        }
+        .orb-1 { width: 60vw; height: 60vw; background: var(--orb-1); top: -10%; left: -10%; }
+        .orb-2 { width: 50vw; height: 50vw; background: var(--orb-2); bottom: -10%; right: -10%; animation-delay: -5s; }
 
         @keyframes float {
-            0% { transform: translate(0, 0) scale(1); }
-            50% { transform: translate(40px, 60px) scale(1.1); }
-            100% { transform: translate(-30px, 20px) scale(0.95); }
-        }
-
-        .frosted-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            z-index: -1;
-            backdrop-filter: blur(80px) saturate(120%);
-            -webkit-backdrop-filter: blur(80px) saturate(120%);
-            background: var(--glass-overlay);
-            pointer-events: none;
+            0% { transform: translate(0, 0); }
+            100% { transform: translate(40px, 60px); }
         }
 
         main {
-            flex: 1;
+            width: 100%;
+            max-width: 900px;
+            padding: 4rem 2rem;
             display: flex;
             flex-direction: column;
-            justify-content: center;
             align-items: center;
-            padding: calc(var(--spacing-unit) * 2);
-            text-align: center;
-            position: relative;
             z-index: 10;
         }
 
-        .content-wrapper {
-            padding: calc(var(--spacing-unit) * 3);
-            max-width: 900px;
-            width: 100%;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            /* 确保初始状态可见，以防动画失败 */
-            opacity: 0; 
-            animation: fadeInUp var(--transition-speed) var(--ease-out-expo) forwards;
-            transform: translateY(40px);
-        }
-
-        .logo-container {
-            margin-bottom: calc(var(--spacing-unit) * 1);
-        }
-        
-        h1 {
-            font-weight: 600;
-            font-size: 1.2rem;
-            letter-spacing: 0.1em;
-            text-transform: uppercase;
-            color: var(--meta-color);
+        header {
+            text-align: center;
             margin-bottom: 3rem;
         }
 
-        .data-display {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 2rem;
-            width: 100%;
-            margin-bottom: 4rem;
+        h1 {
+            font-size: 1.1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            color: var(--meta-color);
+            margin-bottom: 1.5rem;
         }
 
-        .data-card {
+        /* 状态胶囊 - 毛玻璃 */
+        .status-badge {
+            display: inline-block;
+            padding: 0.6rem 2rem;
+            border-radius: 50px;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            backdrop-filter: var(--glass-blur);
+            -webkit-backdrop-filter: var(--glass-blur);
+            box-shadow: var(--card-shadow);
+            font-size: 0.95rem;
+            font-weight: 500;
+        }
+
+        /* 卡片容器 - 毛玻璃 */
+        .glass-card {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            backdrop-filter: var(--glass-blur);
+            -webkit-backdrop-filter: var(--glass-blur);
+            border-radius: 24px;
+            box-shadow: var(--card-shadow);
+            padding: 2rem;
+            width: 100%;
+            margin-bottom: 2rem;
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        @media (max-width: 768px) {
+            .dashboard { grid-template-columns: 1fr; }
+        }
+
+        .metric-item {
             display: flex;
             flex-direction: column;
             align-items: center;
+            justify-content: center;
         }
 
-        .data-value {
-            font-size: 5rem;
-            font-weight: 800;
-            line-height: 1;
-            letter-spacing: -0.05em;
-            background: linear-gradient(180deg, var(--text-color) 20%, var(--accent-color) 100%);
+        .card-value {
+            font-size: 3.5rem;
+            font-weight: 700;
+            background: linear-gradient(180deg, var(--text-color), var(--accent-color));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            margin-bottom: 0.5rem;
-        }
-
-        .data-label {
-            font-size: 1rem;
-            color: var(--accent-color);
-            font-weight: 400;
+            font-variant-numeric: tabular-nums;
+            line-height: 1.1;
         }
         
-        .status-pill {
-            display: inline-flex;
+        .card-unit { font-size: 1rem; margin-left: 4px; opacity: 0.6; }
+        .card-label { margin-top: 0.5rem; font-size: 0.9rem; color: var(--meta-color); }
+
+        /* 图表部分 */
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
             align-items: center;
-            padding: 0.5rem 1.5rem;
-            border-radius: 50px;
-            background: rgba(125, 125, 125, 0.1);
-            border: 1px solid var(--card-border);
-            color: var(--text-color);
-            font-size: 0.9rem;
-            margin-bottom: 2rem;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid var(--glass-border);
         }
+        
+        .chart-title { font-size: 1rem; font-weight: 600; }
+        .config-info { font-size: 0.8rem; color: var(--meta-color); }
 
-        .action-btn {
-            display: inline-block;
-            padding: 1rem 3rem;
-            background-color: var(--text-color);
-            color: var(--bg-color);
-            text-decoration: none;
-            font-weight: 500;
-            border: 1px solid var(--text-color);
-            border-radius: 100px;
-            transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
-            cursor: pointer;
-            font-size: 0.9rem;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
-        }
+        canvas { width: 100%; height: 280px; display: block; }
 
-        .action-btn:hover {
-            background-color: transparent;
-            color: var(--text-color);
-            transform: translateY(-2px) scale(1.02);
-            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
-        }
-
-        footer {
-            padding: var(--spacing-unit);
-            text-align: center;
-            font-size: 0.85rem;
-            color: var(--meta-color);
-            opacity: 0.6;
-            margin-top: auto;
-        }
-
-        .error-message {
-            color: #ff4757;
-            background: rgba(255, 71, 87, 0.1);
+        .error-msg {
+            background: rgba(255, 59, 48, 0.15);
+            color: #ff453a;
             padding: 1rem;
-            border-radius: 8px;
+            border-radius: 12px;
             margin-bottom: 2rem;
+            text-align: center;
             display: none;
+            backdrop-filter: blur(10px);
         }
 
-        @keyframes fadeInUp {
-            0% { opacity: 0; transform: translateY(60px); }
-            100% { opacity: 1; transform: translateY(0); }
-        }
     </style>
 </head>
 <body>
-    <div class="background-orbs">
+    <div class="background">
         <div class="orb orb-1"></div>
         <div class="orb orb-2"></div>
     </div>
-    <div class="frosted-overlay"></div>
 
     <main>
-        <div class="content-wrapper">
-            <div class="logo-container">
-                <h1>iDRAC 风扇控制器</h1>
+        <header>
+            <h1>iDRAC7 Fan Control</h1>
+            <div class="status-badge" id="mode-display">初始化...</div>
+        </header>
+
+        <div class="error-msg" id="error-display"></div>
+
+        <div class="dashboard glass-card">
+            <!-- 曲线温度 (Control) -->
+            <div class="metric-item">
+                <div class="card-value"><span id="t-curve">--</span><span class="card-unit">°C</span></div>
+                <div class="card-label">曲线参照温度</div>
+            </div>
+            
+            <!-- 安全温度 (Safe) -->
+            <div class="metric-item">
+                <div class="card-value"><span id="t-safe">--</span><span class="card-unit">°C</span></div>
+                <div class="card-label">安全参照温度</div>
             </div>
 
-            <div class="status-pill">
-                <span id="mode-display">加载中...</span>
+            <!-- 风扇设定 -->
+            <div class="metric-item">
+                <div class="card-value"><span id="fan-set">--</span><span class="card-unit">%</span></div>
+                <div class="card-label">设定转速</div>
             </div>
+        </div>
 
-            <div class="data-display">
-                <div class="data-card">
-                    <span class="data-value" id="temp-display">--</span>
-                    <span class="data-label">进气温度 (°C)</span>
-                </div>
-                <div class="data-card">
-                    <span class="data-value" id="speed-display">--</span>
-                    <span class="data-label">风扇转速 (%)</span>
-                </div>
+        <div class="glass-card">
+            <div class="chart-header">
+                <div class="chart-title">调速策略可视化</div>
+                <div class="config-info" id="config-summary">加载中...</div>
             </div>
-
-            <div class="error-message" id="error-display"></div>
-
-            <button class="action-btn" onclick="fetchData()">刷新状态</button>
+            <canvas id="curveChart"></canvas>
         </div>
     </main>
 
-    <footer>
-        <div class="request-id-container">最后更新: <span id="time-display">--</span></div>
-    </footer>
-
     <script>
-        async function fetchData() {
-            try {
-                const response = await fetch('/api/status');
-                const data = await response.json();
-                
-                document.getElementById('temp-display').innerText = data.current_temp || "--";
-                document.getElementById('speed-display').innerText = data.fan_speed > 0 ? data.fan_speed : "自动";
-                document.getElementById('mode-display').innerText = "当前模式: " + data.mode;
-                
-                if (data.last_updated) {
-                    document.getElementById('time-display').innerText = new Date(data.last_updated).toLocaleTimeString();
-                }
+        const els = {
+            tCurve: document.getElementById('t-curve'),
+            tSafe: document.getElementById('t-safe'),
+            fanSet: document.getElementById('fan-set'),
+            mode: document.getElementById('mode-display'),
+            config: document.getElementById('config-summary'),
+            err: document.getElementById('error-display'),
+            canvas: document.getElementById('curveChart')
+        };
 
-                const errDiv = document.getElementById('error-display');
-                if (data.last_error) {
-                    errDiv.style.display = 'block';
-                    errDiv.innerText = "错误: " + data.last_error;
-                } else {
-                    errDiv.style.display = 'none';
+        function drawChart(rules, currentCurveTemp) {
+            const ctx = els.canvas.getContext('2d');
+            const dpr = window.devicePixelRatio || 1;
+            const rect = els.canvas.getBoundingClientRect();
+            
+            els.canvas.width = rect.width * dpr;
+            els.canvas.height = rect.height * dpr;
+            ctx.scale(dpr, dpr);
+            
+            const w = rect.width;
+            const h = rect.height;
+            const pad = { top: 20, right: 20, bottom: 30, left: 35 };
+            const graphW = w - pad.left - pad.right;
+            const graphH = h - pad.top - pad.bottom;
+            const lineColor = getComputedStyle(document.documentElement).getPropertyValue('--chart-line').trim();
+            const metaColor = getComputedStyle(document.documentElement).getPropertyValue('--meta-color').trim();
+
+            ctx.clearRect(0, 0, w, h);
+
+            const maxTemp = 60; 
+            const maxSpeed = 100;
+
+            const getX = (t) => pad.left + (t / maxTemp) * graphW;
+            const getY = (s) => pad.top + graphH - (s / maxSpeed) * graphH;
+
+            // 网格与刻度
+            ctx.fillStyle = metaColor;
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'middle';
+            
+            for(let i=0; i<=4; i++) {
+                let val = i * 25;
+                let y = getY(val);
+                ctx.fillText(val + '%', pad.left - 8, y);
+                
+                ctx.beginPath();
+                ctx.strokeStyle = metaColor;
+                ctx.globalAlpha = 0.1;
+                ctx.moveTo(pad.left, y);
+                ctx.lineTo(w - pad.right, y);
+                ctx.stroke();
+            }
+            ctx.globalAlpha = 1.0;
+
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            for(let i=0; i<=6; i++) {
+                let val = i * 10;
+                let x = getX(val);
+                ctx.fillText(val + '°', x, h - pad.bottom + 10);
+            }
+
+            if (!rules || rules.length === 0) return;
+
+            // 绘制阶梯
+            ctx.beginPath();
+            ctx.strokeStyle = lineColor;
+            ctx.lineWidth = 2.5;
+            ctx.lineJoin = 'round';
+            ctx.shadowColor = 'rgba(0,0,0,0.1)';
+            ctx.shadowBlur = 10;
+
+            let startX = getX(0);
+            let startY = getY(rules[0].speed); 
+            ctx.moveTo(startX, startY);
+
+            rules.forEach((r, i) => {
+                let x1 = getX(r.min_temp);
+                let x2 = getX(r.max_temp);
+                let y = getY(r.speed);
+
+                if (i > 0) {
+                    let prevRule = rules[i-1];
+                    let prevY = getY(prevRule.speed);
+                    ctx.lineTo(x1, prevY);
+                    ctx.lineTo(x1, y);
                 }
-            } catch (e) {
-                console.error("获取状态失败", e);
-                document.getElementById('mode-display').innerText = "连接失败";
+                ctx.lineTo(x2, y);
+            });
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+
+            // 当前温度指示
+            if (currentCurveTemp) {
+                let cx = getX(currentCurveTemp);
+                if(cx > pad.left && cx < w - pad.right) {
+                    ctx.beginPath();
+                    ctx.strokeStyle = lineColor;
+                    ctx.setLineDash([4, 4]);
+                    ctx.lineWidth = 1.5;
+                    ctx.moveTo(cx, pad.top);
+                    ctx.lineTo(cx, h - pad.bottom);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    
+                    // 游标点
+                    let targetSpeed = 20;
+                    for(let r of rules) {
+                        if(currentCurveTemp >= r.min_temp && currentCurveTemp <= r.max_temp) {
+                            targetSpeed = r.speed;
+                            break;
+                        }
+                    }
+                    let cy = getY(targetSpeed);
+
+                    ctx.beginPath();
+                    ctx.fillStyle = lineColor;
+                    ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    // 增加白色描边增强对比
+                    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
             }
         }
 
-        // 立即获取，然后每5秒获取一次
-        fetchData();
-        setInterval(fetchData, 5000);
+        async function update() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                
+                els.tCurve.innerText = data.curve_temp;
+                els.tSafe.innerText = data.safe_temp !== -999 ? data.safe_temp : "--";
+                els.fanSet.innerText = data.fan_speed_pct > 0 ? data.fan_speed_pct : "Auto";
+                els.config.innerText = data.config_summary;
+                
+                const isAuto = data.mode === "动态";
+                els.mode.innerText = isAuto ? "自动安全托管" : "手动曲线控制";
+                els.mode.style.color = isAuto ? "#34c759" : "inherit";
+
+                if (data.last_error) {
+                    els.err.style.display = 'block';
+                    els.err.innerText = data.last_error;
+                } else {
+                    els.err.style.display = 'none';
+                }
+
+                drawChart(data.current_curve, data.curve_temp);
+            } catch (e) {
+                console.error(e);
+                els.mode.innerText = "连接中断";
+            }
+        }
+
+        setInterval(update, 3000);
+        update();
+        window.addEventListener('resize', update);
     </script>
 </body>
 </html>

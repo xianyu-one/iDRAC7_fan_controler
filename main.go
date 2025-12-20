@@ -30,12 +30,16 @@ var staticFiles embed.FS
 
 const (
 	defaultPollInterval = 30 * time.Second
-	defaultWebBind      = "127.0.0.1"
+	defaultWebBind      = "0.0.0.0"
 	defaultWebPort      = "8080"
 	defaultFanCurve     = "1-14:10,15-19:15,20-24:20,25-29:25,30-34:30"
-	defaultTempSensor   = "04h" // 进气口温度
-	defaultThreshold    = 35    // 摄氏度
-	defaultIPMIPort     = 623
+
+	// 默认传感器配置
+	defaultCurveSensorID = "04h" // 默认用进气温度跑曲线
+	defaultSafeSensorID  = "0eh" // 默认用 CPU 温度做安全接管
+	defaultSafeThreshold = 60    // 默认 60 度触发自动
+
+	defaultIPMIPort = 623
 )
 
 // Config 存储配置
@@ -44,13 +48,19 @@ type Config struct {
 	User         string
 	Password     string
 	Port         int
-	SensorID     int
-	Threshold    int
 	PollInterval time.Duration
 	WebBind      string
 	WebPort      string
 	FanCurve     []FanRule
-	Insecure     bool
+	ScanMode     bool
+
+	// 传感器配置
+	CurveSensorID int // 用于计算曲线的传感器 (如进气)
+	SafeSensorID  int // 用于判断安全托管的传感器 (如 CPU)
+	PowerSensorID int // 仅用于显示的功耗传感器
+
+	// 阈值
+	SafeThreshold int // 安全传感器超过此值 -> 自动模式
 
 	// 校准参数
 	Scale  float64
@@ -59,19 +69,23 @@ type Config struct {
 
 // FanRule 风扇规则
 type FanRule struct {
-	MinTemp int
-	MaxTemp int
-	Speed   int
+	MinTemp int `json:"min_temp"`
+	MaxTemp int `json:"max_temp"`
+	Speed   int `json:"speed"`
 }
 
 // AppState 运行时状态
 type AppState struct {
-	mu          sync.RWMutex
-	CurrentTemp int       `json:"current_temp"`
-	FanSpeed    int       `json:"fan_speed"`
-	Mode        string    `json:"mode"`
-	LastUpdated time.Time `json:"last_updated"`
-	LastError   string    `json:"last_error,omitempty"`
+	mu            sync.RWMutex
+	CurveTemp     int       `json:"curve_temp"`    // 曲线参照温度
+	SafeTemp      int       `json:"safe_temp"`     // 安全参照温度
+	PowerUsage    int       `json:"power_usage"`   // 功耗
+	FanSpeedPct   int       `json:"fan_speed_pct"` // 设定转速
+	Mode          string    `json:"mode"`
+	ConfigSummary string    `json:"config_summary"` // 用于前端显示当前策略
+	LastUpdated   time.Time `json:"last_updated"`
+	LastError     string    `json:"last_error,omitempty"`
+	CurrentCurve  []FanRule `json:"current_curve"`
 }
 
 // --- 全局状态 ---
@@ -90,16 +104,25 @@ func main() {
 		log.Fatalf("配置错误: %v", err)
 	}
 
+	state.mu.Lock()
+	state.CurrentCurve = cfg.FanCurve
+	state.ConfigSummary = fmt.Sprintf("安全托管: 传感器[0x%02x] > %d°C", cfg.SafeSensorID, cfg.SafeThreshold)
+	state.mu.Unlock()
+
+	if cfg.ScanMode {
+		runScanMode(cfg)
+		return
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 启动 Web 服务器 (独立 goroutine)
 	go startWebServer(cfg.WebBind, cfg.WebPort)
 
-	log.Printf("正在启动 iDRAC 风扇控制 (长连接模式, 目标: %s:%d, 间隔: %s)", cfg.Host, cfg.Port, cfg.PollInterval)
-	if cfg.Scale != 1.0 || cfg.Offset != 0 {
-		log.Printf("启用温度校准: 原始值 * %.2f + (%d)", cfg.Scale, cfg.Offset)
-	}
+	log.Printf("启动 iDRAC 风扇控制 (目标: %s:%d)", cfg.Host, cfg.Port)
+	log.Printf("策略: 传感器[0x%02x]控制曲线, 传感器[0x%02x] > %d°C 时触发自动",
+		cfg.CurveSensorID, cfg.SafeSensorID, cfg.SafeThreshold)
+
 	runPersistentControlLoop(ctx, cfg)
 }
 
@@ -111,15 +134,25 @@ func parseConfig() (*Config, error) {
 	host := flag.String("ip", os.Getenv("IDRAC_IP"), "iDRAC IP 地址")
 	user := flag.String("user", os.Getenv("IDRAC_USER"), "iDRAC 用户名")
 	pass := flag.String("password", os.Getenv("IDRAC_PASSWORD"), "iDRAC 密码")
-	sensorStr := flag.String("sensor", getEnvOrDefault("TEMP_SENSOR", defaultTempSensor), "温度传感器 ID")
+
+	scan := flag.Bool("scan", false, "扫描模式")
+
+	// 传感器参数
+	curveSensorStr := flag.String("sensor", getEnvOrDefault("SENSOR_CURVE", defaultCurveSensorID), "控制曲线的传感器 ID (默认进气 04h)")
+	safeSensorStr := flag.String("sensor-safe", getEnvOrDefault("SENSOR_SAFE", defaultSafeSensorID), "安全托管传感器 ID (默认 CPU 0eh)")
+	pwrSensorStr := flag.String("sensor-power", "", "功耗传感器 ID (仅显示)")
+
+	// 阈值参数
+	safeThreshold := flag.Int("threshold", defaultSafeThreshold, "安全传感器触发自动模式的阈值")
+
 	bind := flag.String("bind", getEnvOrDefault("WEB_BIND", defaultWebBind), "Web 监听地址")
 	port := flag.String("port", getEnvOrDefault("WEB_PORT", defaultWebPort), "Web 端口")
 	intervalStr := flag.String("interval", getEnvOrDefault("POLL_INTERVAL", "30s"), "轮询间隔")
 	curveStr := flag.String("curve", getEnvOrDefault("FAN_CURVE", defaultFanCurve), "风扇曲线")
 
 	// 校准参数
-	scaleStr := flag.Float64("scale", 1.0, "温度比例系数 (默认 1.0)")
-	offsetStr := flag.Int("offset", 0, "温度偏移量 (默认 0)")
+	scaleStr := flag.Float64("scale", 1.0, "温度比例系数")
+	offsetStr := flag.Int("offset", -128, "温度偏移量 (默认 -128)")
 
 	flag.Parse()
 
@@ -136,7 +169,7 @@ func parseConfig() (*Config, error) {
 	}
 
 	if *host == "" || *user == "" || *pass == "" {
-		return nil, fmt.Errorf("缺少必要的凭据 (ip, user, password)")
+		return nil, fmt.Errorf("缺少凭据 (ip, user, password)")
 	}
 
 	cfg.Host = *host
@@ -145,32 +178,34 @@ func parseConfig() (*Config, error) {
 	cfg.Port = defaultIPMIPort
 	cfg.WebBind = *bind
 	cfg.WebPort = *port
-	cfg.Threshold = defaultThreshold
+	cfg.SafeThreshold = *safeThreshold
 	cfg.Scale = *scaleStr
 	cfg.Offset = *offsetStr
+	cfg.ScanMode = *scan
 
-	sensorID, err := parseHexID(*sensorStr)
-	if err != nil {
-		return nil, fmt.Errorf("无效的传感器 ID: %v", err)
+	var err error
+	if cfg.CurveSensorID, err = parseHexID(*curveSensorStr); err != nil {
+		return nil, fmt.Errorf("曲线传感器 ID 无效: %v", err)
 	}
-	cfg.SensorID = sensorID
+	if cfg.SafeSensorID, err = parseHexID(*safeSensorStr); err != nil {
+		return nil, fmt.Errorf("安全传感器 ID 无效: %v", err)
+	}
+	cfg.PowerSensorID, _ = parseHexID(*pwrSensorStr)
 
-	dur, err := time.ParseDuration(*intervalStr)
-	if err != nil {
-		return nil, fmt.Errorf("无效的时间间隔格式: %v", err)
+	if cfg.PollInterval, err = time.ParseDuration(*intervalStr); err != nil {
+		return nil, fmt.Errorf("时间间隔无效: %v", err)
 	}
-	cfg.PollInterval = dur
-
-	rules, err := parseFanCurve(*curveStr)
-	if err != nil {
-		return nil, fmt.Errorf("无效的风扇曲线: %v", err)
+	if cfg.FanCurve, err = parseFanCurve(*curveStr); err != nil {
+		return nil, fmt.Errorf("风扇曲线无效: %v", err)
 	}
-	cfg.FanCurve = rules
 
 	return cfg, nil
 }
 
 func parseHexID(s string) (int, error) {
+	if s == "" {
+		return 0, nil
+	}
 	s = strings.TrimSpace(strings.ToLower(s))
 	s = strings.TrimSuffix(s, "h")
 	s = strings.TrimPrefix(s, "0x")
@@ -206,74 +241,79 @@ func getEnvOrDefault(key, fallback string) string {
 	return fallback
 }
 
-// --- 控制逻辑 (长连接版) ---
+// --- 扫描模式 ---
+
+func runScanMode(cfg *Config) {
+	client, err := ipmi.NewClient(cfg.Host, cfg.Port, cfg.User, cfg.Password)
+	if err != nil {
+		log.Fatalf("客户端错误: %v", err)
+	}
+	if err := client.Connect(context.Background()); err != nil {
+		log.Fatalf("连接错误: %v", err)
+	}
+	defer client.Close(context.Background())
+
+	log.Println("=== 传感器扫描 (Offset: -128) ===")
+	fmt.Printf("%-10s | %-10s | %s\n", "ID", "Raw", "Temp(C)")
+	fmt.Println(strings.Repeat("-", 40))
+
+	for i := 0; i < 256; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		reading, err := client.GetSensorReading(ctx, uint8(i))
+		cancel()
+		if err == nil {
+			raw := int(reading.Reading)
+			fmt.Printf("0x%02x       | %-10d | %d\n", i, raw, raw-128)
+		}
+	}
+}
+
+// --- 控制循环 ---
 
 func runPersistentControlLoop(ctx context.Context, cfg *Config) {
 	var client *ipmi.Client
 	var err error
-
-	// 创建定时器
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
-	// 信号处理
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-	// 辅助函数：安全关闭连接
 	closeClient := func() {
 		if client != nil {
-			// 尝试关闭会话，忽略错误
 			_ = client.Close(context.Background())
 			client = nil
 		}
 	}
 
-	// 退出时的清理
 	defer func() {
-		log.Println("程序正在退出...")
+		log.Println(">>> 程序退出，恢复 BIOS 自动控制...")
+		if client == nil {
+			// 尝试临时重连
+			tmp, e := ipmi.NewClient(cfg.Host, cfg.Port, cfg.User, cfg.Password)
+			if e == nil && tmp.Connect(context.Background()) == nil {
+				client = tmp
+			}
+		}
 		if client != nil {
-			log.Println("尝试恢复动态控制...")
 			_ = setIPMIDynamicControl(context.Background(), client, true)
 			closeClient()
 		}
 	}()
 
 	for {
-		// 1. 确保连接存在
 		if client == nil {
-			log.Println("正在连接 iDRAC...")
-			client, err = ipmi.NewClient(cfg.Host, cfg.Port, cfg.User, cfg.Password)
+			client, err = connectIPMI(ctx, cfg)
 			if err != nil {
-				handleError(fmt.Errorf("客户端创建失败: %v", err))
+				handleError(fmt.Errorf("连接重试: %v", err))
 				goto WAIT
 			}
-
-			// 连接超时设置
-			connCtx, connCancel := context.WithTimeout(ctx, 5*time.Second)
-			if err := client.Connect(connCtx); err != nil {
-				connCancel()
-				handleError(fmt.Errorf("连接失败: %v (请检查密码或并发会话数)", err))
-				closeClient()
-				goto WAIT
-			}
-			connCancel()
-			log.Println("iDRAC 连接成功")
 		}
 
-		// 2. 执行逻辑
-		{
-			// 给单次操作设置超时，防止卡死
-			opCtx, opCancel := context.WithTimeout(ctx, 5*time.Second)
-			err = processCycleOnce(opCtx, client, cfg)
-			opCancel()
-
-			if err != nil {
-				handleError(err)
-				// 如果是网络或会话错误，关闭连接以便下次重连
-				log.Println("操作失败，重置连接...")
-				closeClient()
-			}
+		if err := processCycle(ctx, client, cfg); err != nil {
+			handleError(err)
+			log.Println("通信异常，重置连接...")
+			closeClient()
 		}
 
 	WAIT:
@@ -281,76 +321,132 @@ func runPersistentControlLoop(ctx context.Context, cfg *Config) {
 		case <-ctx.Done():
 			return
 		case <-sigs:
-			return // 触发 defer
+			return
 		case <-ticker.C:
-			// 继续下一次循环
+			continue
 		}
 	}
 }
 
-func processCycleOnce(ctx context.Context, client *ipmi.Client, cfg *Config) error {
-	// 1. 获取温度
-	temp, rawVal, err := getIPMITemperature(ctx, client, cfg.SensorID, cfg.Scale, cfg.Offset)
+func connectIPMI(ctx context.Context, cfg *Config) (*ipmi.Client, error) {
+	client, err := ipmi.NewClient(cfg.Host, cfg.Port, cfg.User, cfg.Password)
 	if err != nil {
-		return fmt.Errorf("读取温度失败: %w", err)
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+func processCycle(ctx context.Context, client *ipmi.Client, cfg *Config) error {
+	opCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	metrics, err := collectAllMetrics(opCtx, client, cfg)
+	if err != nil {
+		return err
 	}
 
-	updateStateTemp(temp)
+	updateStateMetrics(metrics)
 
-	// --- 智能校准提示 ---
-	// 如果读数 > 100°C 且未设置 Offset，极大可能是因为没有减去 128
-	// 此时如果不处理，逻辑会认为系统过热 (144 > 35) 从而触发动态控制（全速）
-	if temp > 100 && cfg.Offset == 0 {
-		log.Printf("⚠️  警告: 读取到异常高温 (%d°C)！", temp)
-		log.Printf("⚠️  分析: 原始值 %d 减去 128 后为 %d°C，这通常是 Dell 12G 服务器的预期值。", rawVal, rawVal-128)
-		log.Printf("⚠️  建议: 请立即停止程序，并添加参数重启: -offset -128")
+	return executeFanControl(opCtx, client, cfg, metrics)
+}
 
-		// 临时保护：在这种极端异常下，我们暂时认为它是误报，不强制切回动态控制，
-		// 而是尝试用修正后的值来跑一次逻辑，避免风扇无故狂转。
-		// 但为了安全，如果修正后还是高，我们就不管了。
-		correctedTemp := temp - 128
-		if correctedTemp < cfg.Threshold {
-			log.Printf("⚠️  [临时自动修正] 使用 %d°C 进行本次风扇控制...", correctedTemp)
-			temp = correctedTemp
+type MetricResult struct {
+	CurveTemp int // 用于曲线的温度
+	SafeTemp  int // 用于安全的温度
+	Power     int
+}
+
+func collectAllMetrics(ctx context.Context, client *ipmi.Client, cfg *Config) (MetricResult, error) {
+	res := MetricResult{}
+
+	// 1. 读取曲线传感器 (如进气)
+	t1, _, err := getIPMISensorValue(ctx, client, cfg.CurveSensorID, cfg.Scale, cfg.Offset)
+	if err != nil {
+		return res, fmt.Errorf("读取曲线传感器(0x%x)失败: %w", cfg.CurveSensorID, err)
+	}
+	res.CurveTemp = t1
+
+	// 2. 读取安全传感器 (如 CPU)
+	// 如果 ID 相同，直接复用，减少 IPMI 请求
+	if cfg.SafeSensorID == cfg.CurveSensorID {
+		res.SafeTemp = t1
+	} else {
+		t2, _, err := getIPMISensorValue(ctx, client, cfg.SafeSensorID, cfg.Scale, cfg.Offset)
+		if err != nil {
+			// 安全传感器读取失败是严重错误吗？暂且记录但不中断循环，防止程序崩溃
+			log.Printf("读取安全传感器(0x%x)失败: %v", cfg.SafeSensorID, err)
+			res.SafeTemp = -999 // 标记无效
+		} else {
+			res.SafeTemp = t2
 		}
 	}
 
-	// 2. 控制风扇
-	if temp >= cfg.Threshold {
+	// 3. 读取功耗 (可选)
+	if cfg.PowerSensorID > 0 {
+		p, _, err := getIPMISensorValue(ctx, client, cfg.PowerSensorID, 1.0, 0)
+		if err == nil {
+			res.Power = p
+		}
+	}
+
+	return res, nil
+}
+
+func executeFanControl(ctx context.Context, client *ipmi.Client, cfg *Config, m MetricResult) error {
+	// 简单的异常数据过滤
+	if m.CurveTemp > 100 && cfg.Offset == 0 {
+		log.Printf("⚠️ 曲线温度读数异常 (%d°C)，跳过控制", m.CurveTemp)
+		return nil
+	}
+
+	// 核心逻辑：安全传感器是否超标
+	forceAuto := false
+	reason := ""
+
+	if m.SafeTemp != -999 && m.SafeTemp >= cfg.SafeThreshold {
+		forceAuto = true
+		reason = fmt.Sprintf("安全传感器(0x%x) %d°C >= %d°C", cfg.SafeSensorID, m.SafeTemp, cfg.SafeThreshold)
+	}
+
+	if forceAuto {
+		// 切换到动态 (BIOS) 控制
 		if state.Mode != "动态" {
-			log.Printf("温度 %d°C (原始值: %d) >= %d°C. 启用动态控制。", temp, rawVal, cfg.Threshold)
+			log.Printf("触发阈值 [%s]. 切换 BIOS 托管", reason)
 			if err := setIPMIDynamicControl(ctx, client, true); err != nil {
-				return fmt.Errorf("启用动态控制失败: %w", err)
+				return err
 			}
 			updateStateMode("动态", 0)
 		}
 	} else {
-		targetSpeed := calculateFanSpeed(temp, cfg.FanCurve)
+		// 切换到手动控制
+		speed := calculateFanSpeed(m.CurveTemp, cfg.FanCurve)
 
-		// 每次都强制写入，防止被其他机制覆盖
+		// 每次都强制发送“禁用动态控制”，防止被外部重置
 		if err := setIPMIDynamicControl(ctx, client, false); err != nil {
-			return fmt.Errorf("禁用动态控制失败: %w", err)
+			return err
+		}
+		if err := setIPMIFanSpeed(ctx, client, speed); err != nil {
+			return err
 		}
 
-		if err := setIPMIFanSpeed(ctx, client, targetSpeed); err != nil {
-			return fmt.Errorf("设置风扇转速失败: %w", err)
+		// 降低日志频率
+		if state.Mode != "手动" || abs(state.FanSpeedPct-speed) >= 5 {
+			log.Printf("CurveTemp: %d°C | SafeTemp: %d°C | Fan: %d%%", m.CurveTemp, m.SafeTemp, speed)
 		}
-
-		log.Printf("温度: %d°C (原始值: %d). 设置风扇转速: %d%%", temp, rawVal, targetSpeed)
-		updateStateMode("手动", targetSpeed)
+		updateStateMode("手动", speed)
 	}
 	return nil
 }
 
-func handleError(err error) {
-	log.Printf("错误: %v", err)
-	updateStateError(err)
-}
-
 func calculateFanSpeed(temp int, rules []FanRule) int {
-	for _, rule := range rules {
-		if temp >= rule.MinTemp && temp <= rule.MaxTemp {
-			return rule.Speed
+	for _, r := range rules {
+		if temp >= r.MinTemp && temp <= r.MaxTemp {
+			return r.Speed
 		}
 	}
 	if len(rules) > 0 {
@@ -359,24 +455,24 @@ func calculateFanSpeed(temp int, rules []FanRule) int {
 	return 20
 }
 
-// --- IPMI 交互 ---
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
 
-func getIPMITemperature(ctx context.Context, client *ipmi.Client, sensorID int, scale float64, offset int) (int, int, error) {
-	reading, err := client.GetSensorReading(ctx, uint8(sensorID))
+func getIPMISensorValue(ctx context.Context, client *ipmi.Client, id int, scale float64, offset int) (int, int, error) {
+	r, err := client.GetSensorReading(ctx, uint8(id))
 	if err != nil {
 		return 0, 0, err
 	}
-
-	rawVal := int(reading.Reading)
-
-	// 应用校准公式：Raw * Scale + Offset
-	// 注意：先应用 Scale，再加 Offset
-	calcVal := int(float64(rawVal)*scale) + offset
-
-	return calcVal, rawVal, nil
+	raw := int(r.Reading)
+	val := int(float64(raw)*scale) + offset
+	return val, raw, nil
 }
 
-// --- 自定义 Raw 命令实现 ---
+// --- IPMI Commands ---
 
 type DellOEMRequest struct {
 	NetFn uint8
@@ -384,57 +480,35 @@ type DellOEMRequest struct {
 	Data  []byte
 }
 
-func (req *DellOEMRequest) Command() ipmi.Command {
-	return ipmi.Command{
-		NetFn: ipmi.NetFn(req.NetFn),
-		ID:    req.Cmd,
-	}
+func (r *DellOEMRequest) Command() ipmi.Command {
+	return ipmi.Command{NetFn: ipmi.NetFn(r.NetFn), ID: r.Cmd}
 }
-
-func (req *DellOEMRequest) Pack() []byte {
-	return req.Data
-}
+func (r *DellOEMRequest) Pack() []byte { return r.Data }
 
 type DellOEMResponse struct {
-	CompletionCodeVal ipmi.CompletionCode
-	Data              []byte
+	CC   ipmi.CompletionCode
+	Data []byte
 }
 
-func (res *DellOEMResponse) CompletionCode() ipmi.CompletionCode {
-	return res.CompletionCodeVal
-}
-
-func (res *DellOEMResponse) CompletionCodes() map[uint8]string {
-	return map[uint8]string{}
-}
-
-func (res *DellOEMResponse) Unpack(data []byte) error {
-	if len(data) > 0 {
-		res.CompletionCodeVal = ipmi.CompletionCode(data[0])
-		res.Data = data[1:]
+func (r *DellOEMResponse) CompletionCode() ipmi.CompletionCode { return r.CC }
+func (r *DellOEMResponse) CompletionCodes() map[uint8]string   { return map[uint8]string{} }
+func (r *DellOEMResponse) Unpack(d []byte) error {
+	if len(d) > 0 {
+		r.CC = ipmi.CompletionCode(d[0])
+		r.Data = d[1:]
 	}
 	return nil
 }
+func (r *DellOEMResponse) Format() string { return "" }
 
-func (res *DellOEMResponse) Format() string {
-	return fmt.Sprintf("Code: %02x, Data: %x", res.CompletionCodeVal, res.Data)
-}
-
-func sendRawCmd(ctx context.Context, client *ipmi.Client, netFn uint8, cmd uint8, data []byte) error {
-	req := &DellOEMRequest{
-		NetFn: netFn,
-		Cmd:   cmd,
-		Data:  data,
-	}
+func sendRawCmd(ctx context.Context, client *ipmi.Client, netFn, cmd uint8, data []byte) error {
+	req := &DellOEMRequest{NetFn: netFn, Cmd: cmd, Data: data}
 	res := &DellOEMResponse{}
-
-	err := client.Exchange(ctx, req, res)
-	if err != nil {
+	if err := client.Exchange(ctx, req, res); err != nil {
 		return err
 	}
-
-	if res.CompletionCode() != ipmi.CompletionCode(0x00) {
-		return fmt.Errorf("IPMI 命令失败，完成代码: 0x%02x", res.CompletionCode())
+	if res.CompletionCode() != ipmi.CompletionCode(0) {
+		return fmt.Errorf("IPMI Error: 0x%02x", res.CompletionCode())
 	}
 	return nil
 }
@@ -447,16 +521,18 @@ func setIPMIDynamicControl(ctx context.Context, client *ipmi.Client, enable bool
 	return sendRawCmd(ctx, client, 0x30, 0x30, []byte{0x01, val})
 }
 
-func setIPMIFanSpeed(ctx context.Context, client *ipmi.Client, speedPercent int) error {
-	return sendRawCmd(ctx, client, 0x30, 0x30, []byte{0x02, 0xff, byte(speedPercent)})
+func setIPMIFanSpeed(ctx context.Context, client *ipmi.Client, speed int) error {
+	return sendRawCmd(ctx, client, 0x30, 0x30, []byte{0x02, 0xff, byte(speed)})
 }
 
-// --- 状态管理 ---
+// --- 状态与Web ---
 
-func updateStateTemp(temp int) {
+func updateStateMetrics(m MetricResult) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	state.CurrentTemp = temp
+	state.CurveTemp = m.CurveTemp
+	state.SafeTemp = m.SafeTemp
+	state.PowerUsage = m.Power
 	state.LastUpdated = time.Now()
 	state.LastError = ""
 }
@@ -465,39 +541,27 @@ func updateStateMode(mode string, speed int) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.Mode = mode
-	state.FanSpeed = speed
+	state.FanSpeedPct = speed
 }
 
-func updateStateError(err error) {
+func handleError(err error) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.LastError = err.Error()
 	state.LastUpdated = time.Now()
 }
 
-// --- Web 服务器 ---
-
 func startWebServer(bind, port string) {
 	fsys, err := fs.Sub(staticFiles, "static")
 	if err != nil {
-		log.Printf("无法加载静态文件: %v", err)
 		return
 	}
-
 	http.Handle("/", http.FileServer(http.FS(fsys)))
-	http.HandleFunc("/api/status", handleStatus)
-
-	addr := bind + ":" + port
-	log.Printf("Web 仪表盘已启动: http://%s", addr)
-	// 移除了 Fatalf，防止端口错误导致主程序退出
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Printf("Web 服务器启动失败 (非致命): %v", err)
-	}
-}
-
-func handleStatus(w http.ResponseWriter, r *http.Request) {
-	state.mu.RLock()
-	defer state.mu.RUnlock()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(state)
+	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		state.mu.RLock()
+		defer state.mu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(state)
+	})
+	http.ListenAndServe(bind+":"+port, nil)
 }
